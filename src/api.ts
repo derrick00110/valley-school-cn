@@ -1,60 +1,68 @@
-// ===================== 前端 API 层（替换 Firebase） =====================
-// 本地开发指向 localhost:3001，生产环境指向 Zeabur 域名
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+// ===================== Supabase API 层 =====================
+const SUPABASE_URL = 'https://zkzlqtvssirxbblfpqsn.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_P5UU2t1-R_hlx2Axzt0RhA_Tc9t-vzy';
 
-async function request(method, path, body) {
-  const opts = {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-  };
-  if (body) opts.body = JSON.stringify(body);
-  const res = await fetch(`${API_BASE}/api${path}`, opts);
+async function supabaseFetch(path, options = {}) {
+  const url = `${SUPABASE_URL}/rest/v1/${path}`;
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      'apikey': SUPABASE_ANON_KEY,
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=representation',
+      ...options.headers,
+    },
+  });
   if (!res.ok) {
     const err = await res.text();
-    throw new Error(err);
+    throw new Error(`Supabase ${res.status}: ${err}`);
   }
   return res.json();
 }
 
 // ===================== 通用 CRUD =====================
+
+/** 获取集合所有数据 */
 export function getCollection(name) {
-  return request('GET', `/collection/${name}`);
+  return supabaseFetch(`${name}?order=createdAt.desc`);
 }
 
+/** 添加文档 */
 export function addToCollection(name, data) {
-  return request('POST', `/collection/${name}`, data);
+  return supabaseFetch(name, {
+    method: 'POST',
+    body: JSON.stringify({ ...data, createdAt: Date.now() }),
+  });
 }
 
+/** 更新文档（按 id 字段匹配） */
 export function updateCollectionItem(name, id, data) {
-  return request('PATCH', `/collection/${name}/${id}`, data);
+  return supabaseFetch(`${name}?id=eq.${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(data),
+  });
 }
 
+/** 删除文档（按 id 字段匹配） */
 export function deleteCollectionItem(name, id) {
-  return request('DELETE', `/collection/${name}/${id}`);
+  return supabaseFetch(`${name}?id=eq.${id}`, {
+    method: 'DELETE',
+  });
 }
 
+/** 按字段批量删除 */
 export function deleteCollectionItemsByField(name, field, value) {
-  return request('DELETE', `/collection/${name}?field=${field}&value=${value}`);
+  return supabaseFetch(`${name}?${field}=eq.${encodeURIComponent(value)}`, {
+    method: 'DELETE',
+  });
 }
 
-// ===================== 简易订阅（轮询） =====================
-const listeners = {};
-let pollTimers = {};
-
+/** 轮询订阅（替代 onSnapshot） */
 export function subscribe(collectionName, callback, pollInterval = 3000) {
-  // 立即获取一次
   getCollection(collectionName).then(callback).catch(console.warn);
-  // 轮询
   const timer = setInterval(async () => {
-    try {
-      const data = await getCollection(collectionName);
-      callback(data);
-    } catch {}
+    try { callback(await getCollection(collectionName)); } catch {}
   }, pollInterval);
   return () => clearInterval(timer);
-}
-
-// ===================== 验证函数 =====================
-export function isApiAvailable() {
-  return request('GET', '/collection/teachers').then(() => true).catch(() => false);
 }
