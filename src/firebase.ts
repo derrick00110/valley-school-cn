@@ -1,87 +1,112 @@
-// ===================== Firebase 兼容层（实际调用本地 API） =====================
+// ===================== Firebase 兼容层（实际调用 Supabase） =====================
 import { shortId } from './utils/db';
 
 export const APP_ID = 'valley-school';
-export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
-// 模拟 Firestore 对象：collection(db, 'teachers') → 返回名字字符串
-function col(name) { return name; }
+const SUPABASE_URL = 'https://zkzlqtvssirxbblfpqsn.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_P5UU2t1-R_hlx2Axzt0RhA_Tc9t-vzy';
 
-// 模拟 Firestore 的 doc 函数
-function doc(collectionName, id) { return { collectionName, id }; }
+async function supabaseFetch(path, options = {}) {
+  const url = `${SUPABASE_URL}/rest/v1/${path}`;
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      'apikey': SUPABASE_ANON_KEY,
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=representation',
+      ...options.headers,
+    },
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    console.warn('Supabase error:', err);
+    return null;
+  }
+  return res.json();
+}
 
-// 模拟 Firestore 的 collection 函数
+// ===================== 集合名转换 =====================
+// collection(db, 'teachers') → 'teachers'
+// collection(db, APP_ID, 'data', 'students_dongguan') → 'students_dongguan'
 export function collection(db, ...parts) {
-  // 拼接集合名：collection(db, 'students', 'dongguan') → 'students_dongguan'
   const parts2 = parts.filter(p => p && p !== APP_ID && p !== 'data');
   return parts2.join('_');
 }
 
-// 模拟 Firestore 的 addDoc
-export async function addDoc(colRef, data) {
-  const doc = { ...data, id: shortId(), createdAt: Date.now() };
-  await fetch(`${API_BASE}/api/collection/${colRef}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(doc),
-  });
-  return doc;
+export function doc(collectionName, id) {
+  return { collectionName, id };
 }
 
-// 模拟 Firestore 的 setDoc
+// ===================== 写操作 =====================
+
+export async function addDoc(colRef, data) {
+  const payload = { ...data, id: shortId(), createdAt: Date.now() };
+  const result = await supabaseFetch(colRef, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+  return { id: payload.id };
+}
+
 export async function setDoc(docRef, data) {
-  const payload = { ...data, id: docRef.id };
-  // PATCH = 如果存在就更新，否则需要先检查
-  await fetch(`${API_BASE}/api/collection/${docRef.collectionName}/${docRef.id}`, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+  const payload = { ...data, id: docRef.id, createdAt: Date.now() };
+  // Upsert: 尝试插入，如果 id 冲突则更新
+  await supabaseFetch(`${docRef.collectionName}?id=eq.${docRef.id}`, {
+    method: 'DELETE',
+  });
+  await supabaseFetch(docRef.collectionName, {
+    method: 'POST',
     body: JSON.stringify(payload),
   });
 }
 
-// 模拟 Firestore 的 updateDoc
 export async function updateDoc(docRef, data) {
-  await fetch(`${API_BASE}/api/collection/${docRef.collectionName}/${docRef.id}`, {
+  // 先获取现有数据，合并后更新
+  await supabaseFetch(`${docRef.collectionName}?id=eq.${docRef.id}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(data),
   });
 }
 
-// 模拟 Firestore 的 deleteDoc
 export async function deleteDoc(docRef) {
-  await fetch(`${API_BASE}/api/collection/${docRef.collectionName}/${docRef.id}`, {
+  await supabaseFetch(`${docRef.collectionName}?id=eq.${docRef.id}`, {
     method: 'DELETE',
   });
 }
 
-// 模拟 Firestore 的 doc 函数（也需要导出）
-export function doc(db, collectionName, ...parts) {
-  const colName = collection(db, collectionName, ...parts);
-  return { collectionName: colName, id: null };
-}
+// ===================== 读操作（轮询替代 onSnapshot） =====================
 
-// 模拟 Firestore 的 onSnapshot（轮询替换）
 export function onSnapshot(colRef, callback, errorCallback) {
   let cancelled = false;
+  let lastData = '';
+
   const poll = async () => {
     if (cancelled) return;
     try {
-      const res = await fetch(`${API_BASE}/api/collection/${colRef}`);
-      const data = await res.json();
-      callback({
-        docs: data.map(d => ({
-          id: d.id,
-          data: () => ({ ...d, id: d.id }),
-        })),
-        docChanges: () => [],
-        forEach: (fn) => data.forEach(d => fn({
-          id: d.id,
-          data: () => ({ ...d, id: d.id }),
-        })),
-      });
+      const data = await supabaseFetch(`${colRef}?order=createdAt.desc`);
+      if (!cancelled && data) {
+        const str = JSON.stringify(data);
+        if (str !== lastData) {
+          lastData = str;
+          callback({
+            docs: data.map(d => ({
+              id: d.id,
+              data: () => ({ ...d, id: d.id }),
+            })),
+            docChanges: () => data.map(d => ({
+              type: 'added',
+              doc: { id: d.id, data: () => ({ ...d, id: d.id }) },
+            })),
+            forEach: (fn) => data.forEach(d => fn({
+              id: d.id,
+              data: () => ({ ...d, id: d.id }),
+            })),
+          });
+        }
+      }
     } catch (e) {
-      if (errorCallback) errorCallback(e);
+      if (!cancelled && errorCallback) errorCallback(e);
     }
     if (!cancelled) setTimeout(poll, 3000);
   };
@@ -89,12 +114,8 @@ export function onSnapshot(colRef, callback, errorCallback) {
   return () => { cancelled = true; };
 }
 
-// 导出 db 对象（模拟 Firestore）
-export const db = {
-  collection: (name) => name,
-  doc: (collectionName, id) => ({ collectionName, id }),
-};
+// ===================== 兼容对象 =====================
 
-// 为了兼容性也导出 auth 和 firebaseReady
+export const db = {};
 export const auth = null;
 export const firebaseReady = true;
